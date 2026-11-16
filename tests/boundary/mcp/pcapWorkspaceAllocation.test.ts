@@ -1,3 +1,4 @@
+import { closeVerifierResources } from "../../../scripts/lib/verifier-cleanup.mjs";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { chmod, mkdir, open, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -46,23 +47,27 @@ const inspectWith = async (allocate: Allocate, path: string) => {
       REA_CAPINFOS_COMMAND: join(stubs, "capinfos-stub.sh"),
     },
   });
+  const session = createTestBinarySession(() => {
+    throw new Error("No native binary provider");
+  });
   const server = createServer(
-    {
-      kind: "session",
-      session: createTestBinarySession(() => {
-        throw new Error("No native binary provider");
-      }),
-    },
+    { kind: "session", session },
     { pcapAnalysis: provider },
   );
   const client = new Client({ name: "pcap-workspace-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
-  onTestFinished(async () => {
-    await client.close();
-    await server.close();
-    await provider.close();
-  });
+  onTestFinished(() =>
+    closeVerifierResources([
+      () => client.close(),
+      () => server.close(),
+      () => provider.close(),
+      async () => {
+        const closed = await session.close();
+        if (!closed.ok) throw closed.error;
+      },
+    ]),
+  );
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   return parseMcpToolError(
@@ -225,6 +230,12 @@ it("still reports a capture over the snapshot budget as a file-size limit", asyn
     details: {
       resource: "file-size",
       reported_limits: { max_capture_bytes: 2 * 1024 ** 3 },
+      refusal: {
+        kind: "fixed_ceiling",
+        allowance_kind: "input",
+        limit: 2 * 1024 ** 3,
+        unit: "bytes",
+      },
     },
   });
   expect(

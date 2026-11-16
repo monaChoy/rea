@@ -13,6 +13,7 @@ import {
   analysisErrorRemediationAction,
   analysisErrorUserMessage,
   assertKnownAnalysisErrorTag,
+  hasAnalysisContinuingCallerGuidance,
 } from "./analysisErrorPresentation.js";
 import {
   AnalysisAccessDeniedError,
@@ -43,6 +44,7 @@ import {
   HopperRemoteError,
   HopperStartError,
   HopperTimeoutError,
+  hopperAppleEventsAuthorizationDenied,
 } from "./hopperErrors.js";
 import { ProviderAdapterError } from "./providerAdapterError.js";
 import { ProviderSelectionError } from "./providerSelectionError.js";
@@ -55,9 +57,13 @@ import {
   type AnalysisCallerLifetime,
   type AnalysisError,
   type AnalysisErrorOptions,
+  type AnalysisRelatedInputs,
   type AnalysisErrorTag,
 } from "./analysisErrorBase.js";
-import { invocationSettingLimit } from "./analysisSettingDefinitions.js";
+import { invocationLimit } from "./analysisSettingDefinitions.js";
+import { analysisErrorRefusal } from "./analysisErrorRefusal.js";
+import { analysisRefusalDetails } from "./analysisRefusal.js";
+import { isRecord } from "../kernel/isRecord.js";
 
 /**
  * Project expected failures into exhaustive, secret-safe caller fields. The
@@ -66,6 +72,21 @@ import { invocationSettingLimit } from "./analysisSettingDefinitions.js";
  * releases its provider session and runtime after this request, such as a
  * one-shot CLI command, passes `"invocation"`.
  */
+/**
+ * Inputs the recovery names, by contract field and operation name. Each
+ * adapter renders them in its own spelling.
+ */
+const relatedInputDetails = (
+  related: AnalysisRelatedInputs | undefined,
+): Record<string, JsonValue> => ({
+  ...(related?.parameters === undefined || related.parameters.length === 0
+    ? {}
+    : { related_parameters: [...related.parameters] }),
+  ...(related?.operations === undefined || related.operations.length === 0
+    ? {}
+    : { related_operations: [...related.operations] }),
+});
+
 export const projectAnalysisError = (
   error: AnalysisError,
   callerLifetime: AnalysisCallerLifetime = "continuing",
@@ -127,9 +148,7 @@ export function* unretainedEvidenceCandidates(
   ] as const) {
     const value = projected.details?.[field];
     if (
-      typeof value === "object" &&
-      value !== null &&
-      !Array.isArray(value) &&
+      isRecord(value) &&
       (value.kind === "unretained-evidence" ||
         value.kind === "unretained-observation" ||
         value.kind === "inline-evidence")
@@ -210,12 +229,7 @@ export const omitUnretainedEvidenceFromError = (
   }
   const { [field]: _partial, ...details } = projected.details!;
   const evidence = partial.evidence;
-  const evidenceId =
-    typeof evidence === "object" &&
-    evidence !== null &&
-    !Array.isArray(evidence)
-      ? evidence.evidence_id
-      : undefined;
+  const evidenceId = isRecord(evidence) ? evidence.evidence_id : undefined;
   const retention =
     partial.kind === "inline-evidence"
       ? typeof partial.retention === "string"
@@ -318,7 +332,7 @@ const projectionDependsOnCallerLifetime = (
     )
       if (
         node.limit !== undefined ||
-        node.continuingCallerGuidance !== undefined ||
+        hasAnalysisContinuingCallerGuidance(node) ||
         node.invocationDiagnostics !== undefined ||
         node.workflowUnknownPublication !== undefined
       )
@@ -376,6 +390,16 @@ const projectError = (
     owner = owner.cleanupPrimary
   )
     partialObservation = owner.partialObservation;
+  let argumentObservations =
+    composed.argumentObservations.length > 0
+      ? composed.argumentObservations
+      : error.argumentObservations;
+  for (
+    let owner = composed.cleanupPrimary;
+    argumentObservations.length === 0 && owner !== undefined;
+    owner = owner.cleanupPrimary
+  )
+    argumentObservations = owner.argumentObservations;
   const completedSourceObservation =
     publication?.completed.kind === "omitted"
       ? undefined
@@ -402,6 +426,7 @@ const projectError = (
   const underlyingCode = underlyingErrorCode(primary);
   const code = error.cleanupIncomplete ? "cleanup_incomplete" : underlyingCode;
   const primaryDetails = errorDetails(primary);
+  const refusal = analysisErrorRefusal(primary);
   const unknownPublication =
     composed.workflowUnknownPublication ?? primary.workflowUnknownPublication;
   const details = {
@@ -423,9 +448,13 @@ const projectError = (
       : {
           limit:
             callerLifetime === "invocation"
-              ? { ...invocationSettingLimit(primary.limit) }
+              ? { ...invocationLimit(primary.limit) }
               : { ...primary.limit },
         }),
+    ...(refusal === undefined
+      ? {}
+      : { refusal: analysisRefusalDetails(refusal) }),
+    ...relatedInputDetails(primary.related),
     ...(!options.secondary || secondary.size === 0
       ? {}
       : {
@@ -476,6 +505,18 @@ const projectError = (
             ? partialObservation
             : jsonValueSchema.parse(partialObservation),
         }),
+    ...(!options.partialObservation || argumentObservations.length === 0
+      ? {}
+      : {
+          argument_observations: argumentObservations.map(
+            ({ argument, observation }) => ({
+              argument,
+              observation: isImmutableJsonSnapshot(observation)
+                ? observation
+                : jsonValueSchema.parse(observation),
+            }),
+          ),
+        }),
     ...(!options.partialObservation || completedSourceObservation === undefined
       ? {}
       : {
@@ -521,9 +562,19 @@ const projectError = (
     category: analysisErrorCategory(error),
     message: analysisErrorUserMessage(error, callerLifetime),
     retryable:
-      RETRYABLE_CODES.has(code) ||
+      (RETRYABLE_CODES.has(code) &&
+        !(
+          error instanceof HopperStartError &&
+          hopperAppleEventsAuthorizationDenied(error.launchRejection)
+        )) ||
       (error instanceof AnalysisCapabilityUnavailableError &&
         error.retryable) ||
+      (error._tag === "ProcessCaptureError" &&
+        "retryable" in error &&
+        error.retryable === true) ||
+      (error instanceof ArtifactOperationError &&
+        error.readerLimit?.can_increase === true &&
+        !error.cleanupIncomplete) ||
       (code === "resource_constraint" &&
         error instanceof AnalysisResourceConstraintError &&
         (error.retryable ?? error.resource === "capacity")),
@@ -601,6 +652,7 @@ const BROWSER_ERROR_CODES: Readonly<
   window_not_found: "unreadable_output",
   window_metadata_missing: "unreadable_output",
   process_ownership_unavailable: "unreadable_output",
+  application_already_running: "target_unavailable",
   cleanup_failed: "execution_failure",
   cancelled: "cancelled",
   timeout: "provider_timeout",
@@ -723,6 +775,9 @@ const requestErrorDetails = (
       resource: error.resource,
       reason: error.reason,
       reported_limits: error.reportedLimits,
+      ...(error.requestSent === undefined
+        ? {}
+        : { request_sent: error.requestSent }),
     };
   if (error instanceof AnalysisArtifactChangedError)
     return {
@@ -730,6 +785,9 @@ const requestErrorDetails = (
       path: error.path,
       reason: error.reason,
       boundary: "stable-artifact-read",
+      ...(error.integrityCheck === undefined
+        ? {}
+        : { integrity_check: error.integrityCheck }),
     };
   if (error instanceof AnalysisAccessDeniedError)
     return {
@@ -779,7 +837,20 @@ const requestErrorDetails = (
         ? {}
         : { binding_mismatch: jsonValueSchema.parse(error.bindingMismatch) }),
     };
-  if (error instanceof EvidenceIntegrityError) return { reason: error.message };
+  if (error instanceof EvidenceIntegrityError)
+    return {
+      reason: error.message,
+      ...(error.side === undefined ? {} : { side: error.side }),
+      ...(error.issuePath === undefined
+        ? {}
+        : { issue_path: [...error.issuePath] }),
+      ...(error.constraint === undefined
+        ? {}
+        : { constraint: error.constraint }),
+      ...(error.remainingIssueCount === undefined
+        ? {}
+        : { remaining_issue_count: error.remainingIssueCount }),
+    };
   return undefined;
 };
 
@@ -787,7 +858,12 @@ const artifactStateErrorDetails = (
   error: AnalysisError,
 ): Readonly<Record<string, JsonValue>> | undefined => {
   if (error instanceof ArtifactOperationError && error.artifactDetails)
-    return projectArtifactIntegrityDetails(error.artifactDetails);
+    return {
+      ...projectArtifactIntegrityDetails(error.artifactDetails),
+      ...(error.integrityCheck === undefined
+        ? {}
+        : { integrity_check: error.integrityCheck }),
+    };
   if (error instanceof ArtifactOperationError)
     return {
       operation: error.operation,
@@ -795,13 +871,27 @@ const artifactStateErrorDetails = (
       ...(error.reason === "limit" ? { truncated: true } : {}),
       ...(error.detail === undefined ? {} : { detail: error.detail }),
       ...(error.boundary === undefined ? {} : { boundary: error.boundary }),
+      ...(error.integrityCheck === undefined
+        ? {}
+        : { integrity_check: error.integrityCheck }),
+      ...(error.readerLimit === undefined
+        ? {}
+        : { reader_limit: { ...error.readerLimit } }),
       ...(error.admission === undefined
         ? {}
         : {
             admission: error.admission.kind,
-            maximum_header_bytes: error.admission.maximumBytes,
-            maximum_header_bytes_source: error.admission.source,
-            setting: "REA_ASAR_MAX_HEADER_BYTES",
+            ...(error.admission.kind === "asar-header"
+              ? {
+                  maximum_header_bytes: error.admission.maximumBytes,
+                  maximum_header_bytes_source: error.admission.source,
+                  setting: "REA_ASAR_MAX_HEADER_BYTES",
+                }
+              : {
+                  maximum_listing_bytes: error.admission.maximumBytes,
+                  maximum_listing_bytes_source: error.admission.source,
+                  setting: "REA_ASAR_MAX_LISTING_BYTES",
+                }),
           }),
     };
   if (error instanceof UnknownRegistryError)
@@ -816,6 +906,9 @@ const artifactStateErrorDetails = (
       operation: error.operation,
       reason: error.reason,
       ...(error.reason === "path-limit" ? { boundary: "filesystem-path" } : {}),
+      ...(error.detectedKind === undefined
+        ? {}
+        : { detected_kind: error.detectedKind }),
       ...(error.systemCode === undefined
         ? {}
         : { system_code: error.systemCode }),
@@ -849,6 +942,9 @@ const providerErrorDetails = (
       provider_id: error.providerId,
       operation: error.operation,
       reason: error.reason,
+      ...(error.alternatives.length === 0
+        ? {}
+        : { alternatives: [...error.alternatives] }),
     };
   if (error instanceof ProviderSelectionError)
     return {
@@ -932,7 +1028,11 @@ const providerErrorDetails = (
       ...(error.launchRejection === undefined
         ? {}
         : { launch_rejection: { ...error.launchRejection } }),
-      retry_action: error.ownerRunId === undefined ? "retry" : "unknown",
+      retry_action:
+        error.ownerRunId === undefined &&
+        !hopperAppleEventsAuthorizationDenied(error.launchRejection)
+          ? "retry"
+          : "unknown",
       ...(error.ownerRunId === undefined
         ? {}
         : { owner_run_id: error.ownerRunId }),
@@ -1027,9 +1127,15 @@ const lifecycleErrorDetails = (
   }
   if (error instanceof ConfigurationError && error.settings.length > 0)
     return {
-      settings: error.settings.map(({ setting, constraint }) => ({
-        setting,
-        constraint,
+      settings: error.settings.map((issue) => ({
+        setting: issue.setting,
+        constraint: issue.constraint,
+        ...(issue.update_mode === undefined
+          ? {}
+          : { update_mode: issue.update_mode }),
+        ...(issue.pending_restart === undefined
+          ? {}
+          : { pending_restart: issue.pending_restart }),
       })),
     };
   if (error instanceof BinaryTargetError)
