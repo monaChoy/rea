@@ -31,14 +31,17 @@ import {
 } from "../process/ExecFileOutput.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 import { waitForAbortableDelay } from "../process/ProviderDeadline.js";
-import { acquireHopperReleaseCacheLease } from "../process/HopperLease.js";
+import {
+  acquireHopperReleaseCacheLease,
+  hopperLeaseMessage,
+} from "../process/HopperLease.js";
 import type { OwnedLease } from "../process/OwnedLease.js";
 import {
   downloadHopperPackage,
-  isHopperRequestCancellation,
   HOPPER_DOWNLOAD_BYTES,
   HOPPER_METADATA_TIMEOUT_MS,
 } from "./HopperDownload.js";
+import { isAbortOf } from "../process/SignalAbort.js";
 import {
   HOPPER_LINUX_PRIMARY_FINGERPRINT,
   HOPPER_PUBLIC_KEY_URL,
@@ -432,6 +435,12 @@ export class LinuxHopperPublisher {
         launcherSha256: digest,
         runId,
         resources,
+        failure: (failure, cause) =>
+          new HopperReleaseError(
+            "verification_unavailable",
+            hopperLeaseMessage(failure),
+            { cause },
+          ),
       });
       if (acquired.acquired) return acquired.lease;
       const remaining = deadline - performance.now();
@@ -900,6 +909,7 @@ export class LinuxHopperPublisher {
           );
         const bytes = await readBoundedFileBytes(handle, stats.size, {
           signal,
+          expectedSize: stats.size,
         });
         if (bytes === undefined)
           throw new HopperReleaseError(
@@ -1086,7 +1096,7 @@ const releaseFailure = (
   signal: AbortSignal | undefined,
   fallback: HopperReleaseError["reason"],
 ): HopperReleaseError => {
-  if (isHopperRequestCancellation(cause, signal))
+  if (isAbortOf(cause, signal))
     return new HopperReleaseError(
       "cancelled",
       "Hopper publisher verification was cancelled.",

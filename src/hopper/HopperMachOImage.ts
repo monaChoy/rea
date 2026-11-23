@@ -27,10 +27,7 @@ import {
   type FatSliceDeclaration,
 } from "../domain/apple/machoContainer.js";
 import { MACHO_CPU_TYPES } from "../domain/apple/machoTargetSelection.js";
-import {
-  HopperCancelledError,
-  HopperStartError,
-} from "../domain/hopperErrors.js";
+import { HopperCancelledError, HopperStartError } from "./HopperErrors.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { readFileHandleChunks } from "../filesystem/readFileHandleChunks.js";
@@ -293,7 +290,7 @@ const inspectHopperMachOImage = async (
         cancelledBy("open_binary", carriedReason(reason)),
     })) {
       if (signal?.aborted) return err(cancelledBy("open_binary", signal));
-      const bytes = Buffer.from(chunk);
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       hash.update(bytes);
       size += bytes.length;
       if (!Number.isSafeInteger(size))

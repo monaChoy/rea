@@ -1,3 +1,4 @@
+import type { ElfDebugLink } from "./native/elfDebugLink.js";
 import type { InterfaceBuilderAnalysis } from "./apple/interfaceBuilderGraph.js";
 import type { PartialTaskMeasurement } from "./desktop/taskDifficulty.js";
 import type { AppleIpsPartialObservation } from "./native/appleIps.js";
@@ -31,19 +32,41 @@ const ANALYSIS_ERROR_TAGS = [
   "EvidenceIntegrityError",
   "EvidenceFileError",
   "UnknownRegistryError",
-  "HopperTimeoutError",
-  "HopperCancelledError",
-  "HopperProtocolError",
-  "HopperRemoteError",
-  "HopperProcessError",
-  "HopperStartError",
   "ConfigurationError",
   "NoBinaryOpenError",
   "BinaryTargetError",
 ] as const;
 
-/** Stable tag for an expected analysis failure. */
+/** Stable tag for an expected analysis failure the domain defines. */
 export type AnalysisErrorTag = (typeof ANALYSIS_ERROR_TAGS)[number];
+
+const DOMAIN_ERROR_TAGS: ReadonlySet<string> = new Set(ANALYSIS_ERROR_TAGS);
+
+/** Whether a tag names an error the domain defines and presents. */
+export const isAnalysisErrorTag = (tag: string): tag is AnalysisErrorTag =>
+  DOMAIN_ERROR_TAGS.has(tag);
+
+/** The error's domain tag; undefined for a provider-owned failure. */
+export const domainErrorTag = (error: {
+  readonly _tag: string;
+}): AnalysisErrorTag | undefined =>
+  isAnalysisErrorTag(error._tag) ? error._tag : undefined;
+
+declare const providerErrorTagBrand: unique symbol;
+
+/**
+ * Tag of a failure a provider module defines and presents itself. It is
+ * outside the domain tag set; the error's `ownPresentation()` supplies what
+ * the domain tables would.
+ */
+export type ProviderErrorTag = string & {
+  readonly [providerErrorTagBrand]: true;
+};
+
+/** Brand the tag of a `ProviderOwnedAnalysisError` subclass. */
+export const providerErrorTag = <const Tag extends string>(
+  tag: Tag,
+): Tag & ProviderErrorTag => tag as Tag & ProviderErrorTag;
 
 /** Retained command output associated with a typed failure; truncation stays explicit. */
 export interface AnalysisCapturedOutput {
@@ -187,6 +210,39 @@ export interface SourcePublicationRecovery {
   readonly completed: SourcePublicationCompletion;
 }
 
+/**
+ * Presentation an error's own module supplies. The shared presenter reads it
+ * before its tables, so it never needs the error's type: a provider error
+ * says what it means for callers where it is defined.
+ */
+export interface AnalysisErrorOwnPresentation {
+  /** The stable code before any cleanup composition. */
+  readonly code: AnalysisErrorProjection["code"];
+  readonly category: AnalysisErrorProjection["category"];
+  /** The outcome every caller receives; absent keeps the code's standard text. */
+  readonly message?: string;
+  /** Guidance only a caller that keeps REA's runtime and session receives. */
+  readonly continuing?: AnalysisContinuingCallerGuidance;
+  /** The next step; absent keeps the shared fallback. */
+  readonly remediation?: string;
+  /** False when the failure cannot clear on retry whatever its code. */
+  readonly retryable?: false;
+  readonly details?: Readonly<Record<string, JsonValue>>;
+}
+
+/**
+ * The provider request a provider-owned failure answered. A shared workflow
+ * that attributes the failure to its caller's operation copies `facts` under
+ * `provider_request` and rebuilds the failure with `reattribute`.
+ */
+export interface ProviderRequestFailure {
+  readonly facts: Readonly<Record<string, JsonValue>>;
+  readonly reattribute: (
+    operation: string,
+    options: AnalysisErrorOptions,
+  ) => AnalysisError;
+}
+
 /** Base class for expected analysis, provider, and session failures. */
 export abstract class AnalysisError extends Error {
   limit: Readonly<AnalysisLimit> | undefined;
@@ -265,7 +321,23 @@ export abstract class AnalysisError extends Error {
     this.#ownedCleanupResources = [...(options?.cleanup?.resources ?? [])];
     this.partialObservation = options?.partialObservation;
   }
-  abstract readonly _tag: AnalysisErrorTag;
+  abstract readonly _tag: AnalysisErrorTag | ProviderErrorTag;
+  /** What this error's own module says it means; undefined uses the shared tables. */
+  ownPresentation(): AnalysisErrorOwnPresentation | undefined {
+    return undefined;
+  }
+  /**
+   * Whether the provider adapter or its process failed, rather than one
+   * request. Session availability treats every operation of that provider as
+   * affected until a later success.
+   */
+  get providerWide(): boolean {
+    return false;
+  }
+  /** The provider request this failure answered; undefined when none. */
+  providerRequest(): ProviderRequestFailure | undefined {
+    return undefined;
+  }
   readonly userMessage: string | undefined = undefined;
   readonly userCategory: "cancelled" | undefined = undefined;
   readonly executionFailure: string | undefined = undefined;
@@ -513,6 +585,15 @@ export abstract class AnalysisError extends Error {
   }
 }
 
+/**
+ * A failure its provider module defines: its tag is outside the domain tag
+ * set, so it must say what it means through `ownPresentation()`.
+ */
+export abstract class ProviderOwnedAnalysisError extends AnalysisError {
+  abstract override readonly _tag: ProviderErrorTag;
+  abstract override ownPresentation(): AnalysisErrorOwnPresentation;
+}
+
 /** Confirmed cleanup reveals the typed primary; unresolved ownership stays visible. */
 export const resolvedAnalysisError = (error: AnalysisError): AnalysisError => {
   while (!error.cleanupIncomplete && error.cleanupPrimary !== undefined)
@@ -546,6 +627,7 @@ import type {
 import type { FileOffsetPartialObservation } from "./native/fileOffsetPartialObservation.js";
 import type { NativeCallPartialObservation } from "./native/nativeCallPartialObservation.js";
 import type { HopperCallerReconciliationPartial } from "./native/hopperCallerReconciliation.js";
+import type { AnalysisErrorProjection } from "./analysisErrorProjection.js";
 import type {
   ElectronActiveObservationResult,
   ElectronActivePartialObservation,
@@ -564,6 +646,7 @@ import type {
   ElectronPagePartialObservation,
 } from "./javascript/electronObservation.js";
 import type { AndroidPartialObservation } from "./android/androidPartialObservation.js";
+import type { UefiPartialObservation } from "./uefi/uefiFirmwareAnalysis.js";
 import type { FirmwarePartialObservation } from "./firmware/firmwareAnalysis.js";
 import type {
   AdbActivityStartPartialObservation,
@@ -573,6 +656,7 @@ import type {
 } from "./adb/adbDeviceAnalysis.js";
 import type {
   InspectMacho,
+  InspectPlist,
   InspectSignature,
 } from "./native/nativeInspection.js";
 import type { NativeUiObservationResult } from "./native/nativeUiObservation.js";
@@ -605,6 +689,7 @@ import type { WebArtifactAcquisition } from "./webArtifactAcquisition.js";
 
 /** Provider-neutral evidence collected before a typed analysis failure. */
 export type AnalysisPartialObservation =
+  | ElfDebugLink
   | InterfaceBuilderAnalysis
   | PartialTaskMeasurement
   | {
@@ -657,9 +742,11 @@ export type AnalysisPartialObservation =
   | RecordedCrashPartialObservation
   | AndroidPartialObservation
   | FirmwarePartialObservation
+  | UefiPartialObservation
   | NativeUiObservationResult
   | InspectSignature
   | InspectMacho
+  | InspectPlist
   | ElectronPagePartialObservation
   | ElectronPageInspection
   | AdbActivityStartPartialObservation

@@ -1,12 +1,34 @@
+import type { UefiAnalysisService } from "../application/uefi/UefiAnalysisService.js";
+import type { MavenGradleMetadataService } from "../application/java/MavenGradleMetadataService.js";
+
+import type { NugetNupkgService } from "../application/nuget/NugetNupkgService.js";
+import type { DwarfUnitsService } from "../application/binaryDiagnostics/DwarfUnitsService.js";
+import type { ElfDependenciesService } from "../application/binaryDiagnostics/ElfDependenciesService.js";
 import type { AdbDeviceAnalysisService } from "../application/adb/AdbDeviceAnalysisService.js";
 import type { AnalysisSettings } from "../application/AnalysisSettings.js";
+import type { AnalysisSettingsReader } from "../domain/analysisSettings.js";
+import type { ElectronFuseService } from "../application/electron/ElectronFuseService.js";
+import type { ElectronObservationPort } from "../ports/javascript/ElectronObservationPort.js";
+import type { ElectronActiveObservationPort } from "../ports/javascript/ElectronActiveObservationPort.js";
+import {
+  inspectElectronPage,
+  listElectronTargets,
+} from "../application/javascript/ElectronObservationService.js";
+import { captureElectronScenario } from "../application/javascript/ElectronActiveObservationService.js";
+import { analyzeJavaScriptApplicationValidated } from "../application/javascript/JavaScriptApplicationService.js";
+import { reconcileJavaScriptRuntimeEvidence } from "../application/javascript/JavaScriptRuntimeReconciliationService.js";
+import { javascriptSourceAnalysis } from "../composition/javascriptSourceAnalysis.js";
 import { analysisSettingsConstraints } from "./analysisSettingsConstraints.js";
 import type { ToolResultDelivery } from "./ToolResultDelivery.js";
 import type { AndroidAnalysisService } from "../application/android/AndroidAnalysisService.js";
-import { inspectAndroidJniBindings } from "../application/android/AndroidJniInspection.js";
-import { inspectAndroidPackage } from "../application/android/AndroidPackageInspection.js";
-import { inspectAndroidSymbol } from "../application/android/AndroidSymbolInspection.js";
 import {
+  androidJniInspectionInputSchema,
+  androidPackageInspectionInputSchema,
+  androidSymbolInspectionInputSchemas,
+} from "../domain/android/androidAnalysis.js";
+import { dartAotInspectionInputSchema } from "../domain/flutter/flutterBuildAnalysis.js";
+import {
+  executeRetainedSummaryOperation,
   inspectAnalysisView,
   projectRetainedAnalysis,
   requireAnalysisViewRetention,
@@ -22,6 +44,7 @@ import type { AppleIpsService } from "../application/binaryDiagnostics/AppleIpsS
 import type { BinaryHardeningService } from "../application/binaryDiagnostics/BinaryHardeningService.js";
 import type { ByteEntropyService } from "../application/binaryDiagnostics/ByteEntropyService.js";
 import type { DevicetreeService } from "../application/binaryDiagnostics/DevicetreeService.js";
+import type { ElfDebugLinkService } from "../application/binaryDiagnostics/ElfDebugLinkService.js";
 import type { ElfNotesService } from "../application/binaryDiagnostics/ElfNotesService.js";
 import type { ElfUnwindRangesService } from "../application/binaryDiagnostics/ElfUnwindRangesService.js";
 import type { KernelBuildConfigService } from "../application/binaryDiagnostics/KernelBuildConfigService.js";
@@ -38,7 +61,6 @@ import type { PacketCaptureService } from "../application/captures/PacketCapture
 import type { BeamService } from "../application/erlang/BeamService.js";
 import type { EvmInterfaceService } from "../application/evm/EvmInterfaceService.js";
 import type { FirmwareAnalysisService } from "../application/firmware/FirmwareAnalysisService.js";
-import { inspectDartAot } from "../application/flutter/DartAotInspection.js";
 import type { FlutterBuildAnalysisService } from "../application/flutter/FlutterBuildAnalysisService.js";
 import type { GoBinaryService } from "../application/go/GoBinaryService.js";
 import type { GpuCodeObjectsService } from "../application/gpu/GpuCodeObjectsService.js";
@@ -115,7 +137,7 @@ import { toolContract } from "../contracts/toolContracts.js";
 import { redactExplicitFailure } from "../domain/explicitSensitiveFailure.js";
 import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
 import { err, ok, type Result } from "../domain/result.js";
-import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
+import { ownedJsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
 import {
   readGuidanceSection,
   searchGuidance,
@@ -128,11 +150,16 @@ import type { BrowserObservationPort } from "../ports/BrowserObservationPort.js"
 import type { GdbSessionManager } from "../gdb/GdbSessionManager.js";
 import type { RizinDebugSessionManager } from "../rizin/RizinDebugSessionManager.js";
 import {
+  resolveRizinCommandRequest,
+  type ReverseEngineeringService,
+} from "../application/reverse/ReverseEngineeringService.js";
+import {
   GDB_SESSION_TOOLS,
   RIZIN_DEBUG_SESSION_TOOLS,
   unknownDebuggerSessionError,
 } from "../domain/debuggerSessionErrors.js";
 import type { ExternalMutationAdmission } from "./externalMutationAdmission.js";
+import type { EvidenceCommand } from "./externalMutationToolHandler.js";
 import {
   optionalProviderUnavailable,
   type OptionalProviderLoadFailure,
@@ -174,8 +201,20 @@ import type { ArtifactResourceScope } from "../resources/index.js";
 import {
   CommittedValue,
   DetailedFailure,
+  ForwardedValue,
   ReducibleValue,
+  type ValueOutcome,
+  type ValueToolRequest,
 } from "./contractToolHandler.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
+import type { ForwardedResult } from "../application/desktop/DesktopBuildComputers.js";
+import { DesktopBuildSteps } from "../application/desktop/DesktopBuildSteps.js";
+import type { ProgressReporter } from "../ports/ProgressReporter.js";
+import {
+  redactedResult,
+  withHeartbeat,
+  type DesktopBuildToolComputers,
+} from "./desktopBuildDelivery.js";
 import {
   getNavigationContext,
   inspectAddressContext,
@@ -202,7 +241,22 @@ import {
   type ContractToolDependencies,
 } from "./contractToolBindings.js";
 import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
+import type {
+  ProviderOperation,
+  ProviderOperationOptions,
+} from "./providerOperationToolHandler.js";
+import type { ToolContract } from "../contracts/toolContractTypes.js";
 import { retainedSummaryDelivery } from "./retainedSummaryDelivery.js";
+import {
+  CLOSE_RETRY,
+  closeWithProcessResources,
+  resetCleanupRetry,
+  type SessionLifecycleOptions,
+} from "./sessionLifecycle.js";
+import {
+  reportOperationEnd,
+  reportOperationStart,
+} from "./operationProgress.js";
 import {
   readSessionStatus,
   type SessionStatusToolOptions,
@@ -255,6 +309,31 @@ export interface RizinDebugToolOptions {
   readonly session: ExternalMutationAdmission | undefined;
 }
 
+/** objdump and Rizin commands, and the session a Rizin command may change. */
+export interface ReverseEngineeringToolOptions {
+  readonly service: Pick<
+    ReverseEngineeringService,
+    "inspectWithObjdump" | "executeRizinCommandValidated" | "retryCleanup"
+  >;
+  readonly session: ExternalMutationAdmission | undefined;
+}
+
+/**
+ * Validate a Rizin request and settle earlier inspection cleanup before
+ * external-mutation admission, so either refusal leaves the bound target open.
+ */
+const prepareRizinCommand =
+  (service: ReverseEngineeringToolOptions["service"]) =>
+  async (input: unknown): Promise<Result<EvidenceCommand, AnalysisError>> => {
+    const request = resolveRizinCommandRequest(input);
+    if (!request.ok) return request;
+    const cleanup = await service.retryCleanup("execute_rizin_command");
+    if (!cleanup.ok) return cleanup;
+    return ok((signal) =>
+      service.executeRizinCommandValidated(request.value, { signal }),
+    );
+  };
+
 /** GDB sessions a manager owns and the session their commands may change. */
 export interface GdbToolOptions {
   readonly manager: Pick<
@@ -279,6 +358,25 @@ export interface BrowserObservationToolOptions {
   readonly loadFailure?: OptionalProviderLoadFailure | undefined;
 }
 
+/** Passive Electron observation is independent of active scenario capture. */
+interface ElectronObservationToolOptions {
+  readonly provider: ElectronObservationPort | undefined;
+  readonly loadFailure?: OptionalProviderLoadFailure | undefined;
+}
+
+/** Existing owned Electron scenario execution and its independent load failure. */
+interface ElectronScenarioToolOptions {
+  readonly provider: ElectronActiveObservationPort | undefined;
+  readonly loadFailure?: OptionalProviderLoadFailure | undefined;
+}
+
+/** Static JavaScript analysis needs local artifacts, never an Electron runtime. */
+interface JavaScriptApplicationToolOptions {
+  readonly resources: ArtifactResourceScope;
+  readonly environment: Readonly<Record<string, string | undefined>>;
+  readonly settings?: AnalysisSettingsReader;
+}
+
 /** The session native matching reads, and its allowance for each accepted call. */
 export interface NativeFunctionMatchingToolOptions {
   readonly session: BinarySessionPort;
@@ -296,6 +394,24 @@ export interface JavaScriptRuntimeToolOptions {
   readonly runtime: JavaScriptRuntimeObservationPort | undefined;
   readonly loadFailure?: OptionalProviderLoadFailure | undefined;
 }
+
+/** One family's provider operations and how they run. */
+export interface ProviderOperationToolOptions extends ProviderOperationOptions {
+  readonly contracts: readonly ToolContract<ProviderOperation>[];
+}
+
+/** The tools that drive build computers. */
+type DesktopBuildTool =
+  | "start_build_computer"
+  | "act_on_build_computer"
+  | "start_build_capture"
+  | "mark_build_checkpoint"
+  | "stop_build_capture"
+  | "export_build_environment"
+  | "check_build_task"
+  | "measure_build_task"
+  | "record_build_consent"
+  | "close_build_computer";
 
 /** The artifact resource scope application workflows read caller-named files under. */
 export interface ApplicationWorkflowToolOptions {
@@ -335,7 +451,7 @@ const viewInputSourceSchema = z.looseObject({
 const analysisViewOverflowSource = (input: unknown): JsonValue | undefined => {
   const parsed = viewInputSourceSchema.safeParse(input);
   return parsed.success && parsed.data.source.kind !== "inline"
-    ? jsonValueSchema.parse(parsed.data.source)
+    ? ownedJsonValueSchema.parse(parsed.data.source)
     : undefined;
 };
 
@@ -343,7 +459,7 @@ const analysisViewOverflowSource = (input: unknown): JsonValue | undefined => {
 const jsonValueResult = <Error>(
   result: Result<unknown, Error>,
 ): Result<JsonValue, Error> =>
-  result.ok ? ok(jsonValueSchema.parse(result.value)) : result;
+  result.ok ? ok(ownedJsonValueSchema.parse(result.value)) : result;
 
 type Bind<Service> = (
   service: Service,
@@ -386,6 +502,12 @@ const SERVICE_TOOL_BINDINGS = {
       run: (input, options) => service.inspect(input, options),
     },
   })) satisfies Bind<ElfNotesService>,
+  elfDebugLink: ((service) => ({
+    inspect_elf_debug_link: {
+      admission: "application",
+      run: (input, options) => service.inspect(input, options),
+    },
+  })) satisfies Bind<ElfDebugLinkService>,
   nativeInitializers: ((service) => ({
     inspect_native_initializers: {
       admission: "sdk",
@@ -500,6 +622,12 @@ const SERVICE_TOOL_BINDINGS = {
       run: (input, options) => service.inspect(input, options, retention),
     },
   })) satisfies Bind<RustBinaryService>,
+  nugetNupkg: ((service) => ({
+    inspect_nuget_nupkg: {
+      admission: "application",
+      run: (input, options) => service.inspect(input, options),
+    },
+  })) satisfies Bind<NugetNupkgService>,
   pythonPyc: ((service) => ({
     inspect_python_pyc: {
       admission: "application",
@@ -577,6 +705,12 @@ const SERVICE_TOOL_BINDINGS = {
       "inspect_firmware_regions",
       "extract_firmware",
     ])) satisfies Bind<FirmwareAnalysisService>,
+  uefiAnalysis: ((service) =>
+    contractServiceBindings(service, [
+      "inspect_uefi_firmware",
+      "extract_uefi_firmware",
+      "inspect_uefi_nvram",
+    ])) satisfies Bind<UefiAnalysisService>,
   pcapAnalysis: ((service) => ({
     ...contractServiceBindings(service, ["inspect_pcap_client"]),
     inspect_pcap_capture: {
@@ -590,7 +724,14 @@ const SERVICE_TOOL_BINDINGS = {
     inspect_dart_aot: {
       admission: "sdk",
       run: (input, options) =>
-        inspectDartAot(service, input, retention, options),
+        executeRetainedSummaryOperation(
+          service,
+          "inspect_dart_aot",
+          dartAotInspectionInputSchema,
+          input,
+          retention,
+          options,
+        ),
     },
   })) satisfies Bind<FlutterBuildAnalysisService>,
   androidAnalysis: ((service, retention) => ({
@@ -601,19 +742,34 @@ const SERVICE_TOOL_BINDINGS = {
     inspect_android_package: {
       admission: "sdk",
       run: (input, options) =>
-        inspectAndroidPackage(service, input, retention, options),
+        executeRetainedSummaryOperation(
+          service,
+          "inspect_android_package",
+          androidPackageInspectionInputSchema,
+          input,
+          retention,
+          options,
+        ),
     },
     inspect_android_jni_bindings: {
       admission: "sdk",
       run: (input, options) =>
-        inspectAndroidJniBindings(service, input, retention, options),
+        executeRetainedSummaryOperation(
+          service,
+          "inspect_android_jni_bindings",
+          androidJniInspectionInputSchema,
+          input,
+          retention,
+          options,
+        ),
     },
     inspect_android_class: {
       admission: "sdk",
       run: (input, options) =>
-        inspectAndroidSymbol(
+        executeRetainedSummaryOperation(
           service,
           "inspect_android_class",
+          androidSymbolInspectionInputSchemas.inspect_android_class,
           input,
           retention,
           options,
@@ -622,9 +778,10 @@ const SERVICE_TOOL_BINDINGS = {
     inspect_android_method: {
       admission: "sdk",
       run: (input, options) =>
-        inspectAndroidSymbol(
+        executeRetainedSummaryOperation(
           service,
           "inspect_android_method",
+          androidSymbolInspectionInputSchemas.inspect_android_method,
           input,
           retention,
           options,
@@ -740,6 +897,24 @@ const SERVICE_TOOL_BINDINGS = {
       run: (input, options) => service.recover(input, options),
     },
   })) satisfies Bind<JavaScriptRecoveryService>,
+  mavenGradleMetadata: ((service) => ({
+    inspect_maven_gradle_metadata: {
+      admission: "application",
+      run: (input, options) => service.inspect(input, options),
+    },
+  })) satisfies Bind<MavenGradleMetadataService>,
+  dwarfUnits: ((service) => ({
+    inspect_dwarf_units: {
+      admission: "application",
+      run: (input, options) => service.inspect(input, options),
+    },
+  })) satisfies Bind<DwarfUnitsService>,
+  elfDependencies: ((service) => ({
+    inspect_elf_dependencies: {
+      admission: "application",
+      summary: (input, options) => service.inspect(input, options),
+    },
+  })) satisfies Bind<ElfDependenciesService>,
   guidance: ((resources) => ({
     search_guidance: {
       admission: "application",
@@ -1279,6 +1454,26 @@ const SERVICE_TOOL_BINDINGS = {
       value: async (input) => session.verifyUnknownResolution(input.unknown_id),
     },
   })) satisfies Bind<SessionDerivedToolOptions>,
+  // objdump inspects under analysis admission. A Rizin command may change
+  // the bound artifact, so it runs under external-mutation admission once
+  // its request is valid and earlier inspection cleanup has settled; a
+  // refusal before then leaves the bound target open.
+  reverseEngineering: (({ service, session }, retention) => ({
+    inspect_with_objdump: {
+      admission: "sdk",
+      run: (input, options) =>
+        service.inspectWithObjdump(input, options, retention),
+    },
+    execute_rizin_command: {
+      admission: "sdk",
+      session,
+      mutation: {
+        kind: "evidence",
+        retryCleanup: () => service.retryCleanup("execute_rizin_command"),
+        prepare: prepareRizinCommand(service),
+      },
+    },
+  })) satisfies Bind<ReverseEngineeringToolOptions>,
   // Rizin debugger sessions may change the bound artifact; each command
   // runs under external-mutation admission and keeps a failed cleanup owned.
   rizinDebug: (({ manager, session }) => {
@@ -1351,19 +1546,21 @@ const SERVICE_TOOL_BINDINGS = {
       },
     };
   }) satisfies Bind<RizinDebugToolOptions>,
-  // Starting GDB loads no target, so it runs outside admission; a console
+  // Starting GDB may load a selected file without running it, outside mutation admission; a console
   // command may change the bound artifact and runs under external-mutation
   // admission, keeping a failed cleanup owned for the next retry.
   gdb: (({ manager, session }) => ({
     start_gdb_session: {
       admission: "sdk",
       value: (input, { signal }) =>
-        manager.start(
-          signal,
-          input.inferior_tty === undefined
+        manager.start(signal, {
+          ...(input.inferior_tty === undefined
             ? {}
-            : { inferiorTty: input.inferior_tty },
-        ),
+            : { inferiorTty: input.inferior_tty }),
+          ...(input.executable === undefined
+            ? {}
+            : { executable: input.executable }),
+        }),
     },
     gdb_console: {
       admission: "sdk",
@@ -1465,6 +1662,85 @@ const SERVICE_TOOL_BINDINGS = {
       },
     };
   }) satisfies Bind<BrowserObservationToolOptions>,
+  electronFuses: ((service) => ({
+    inspect_electron_fuses: {
+      admission: "application",
+      run: (input, options) => service.inspect(input, options),
+    },
+  })) satisfies Bind<Pick<ElectronFuseService, "inspect">>,
+  electronObservation: (({ provider, loadFailure }) => ({
+    list_electron_targets: {
+      admission: "sdk",
+      unavailable: loadFailure,
+      run: (input, options) => listElectronTargets(provider, input, options),
+    },
+    inspect_electron_page: {
+      admission: "sdk",
+      unavailable: loadFailure,
+      run: (input, options) => inspectElectronPage(provider, input, options),
+    },
+  })) satisfies Bind<ElectronObservationToolOptions>,
+  // Keep active capture separate from passive observation and static analysis.
+  // Its existing service owns execution admission, effects and cleanup.
+  electronScenario: (({ provider, loadFailure }) => ({
+    capture_electron_scenario: {
+      admission: "sdk",
+      unavailable: loadFailure,
+      run: (input, options) =>
+        captureElectronScenario(provider, input, options),
+    },
+  })) satisfies Bind<ElectronScenarioToolOptions>,
+  javascriptApplication: ((
+    { resources, environment, settings },
+    retention,
+  ) => ({
+    analyze_javascript_application: {
+      admission: "sdk",
+      run: async ({ detail, view, ...request }, options) => {
+        if (detail === "summary") {
+          const ready = requireAnalysisViewRetention(
+            "analyze_javascript_application",
+            retention,
+          );
+          if (!ready.ok) return ready;
+        }
+        const analyzed = await analyzeJavaScriptApplicationValidated(
+          request,
+          resources,
+          {
+            ...options,
+            sourceAnalysis: javascriptSourceAnalysis,
+            environment,
+            ...(settings === undefined ? {} : { settings }),
+          },
+        );
+        return detail === "summary" && analyzed.ok
+          ? projectRetainedAnalysis(
+              analyzed.value,
+              retention,
+              view ?? { kind: "summary" },
+            )
+          : analyzed;
+      },
+    },
+    reconcile_javascript_runtime: {
+      admission: "sdk",
+      run: async (input, options) => {
+        const result = reconcileJavaScriptRuntimeEvidence(
+          input,
+          retention.evidenceById,
+          options,
+        );
+        if (!result.ok) return result;
+        const recorded = recordEvidenceSources(
+          retention.recordEvidence,
+          result.value.sources,
+          { evidence: result.value.evidence },
+        );
+        return recorded.ok ? ok(result.value.evidence) : recorded;
+      },
+    },
+  })) satisfies Bind<JavaScriptApplicationToolOptions>,
   // Frida sessions instrument a live process the caller selects, not the
   // session's target; compose them without analysis admission.
   frida: ((service, retention) => ({
@@ -1606,10 +1882,65 @@ const SERVICE_TOOL_BINDINGS = {
   processCapture: ((options) => ({
     capture_process_scenario: {
       admission: "sdk",
+      completionProgress: "workflow",
       analyze: (input, _analysis, request) =>
         captureSessionProcessScenario(options, input, request),
     },
   })) satisfies Bind<ProcessSessionCaptureOptions>,
+  // Close and reset order themselves in the session, so they run outside
+  // analysis admission; process-capture and artifact cleanup settle with them.
+  sessionLifecycle: ((options) => {
+    const { session } = options;
+    const close = closeWithProcessResources(options);
+    return {
+      close_binary: {
+        admission: "sdk",
+        value: async (input, { progress }) => {
+          const snapshotPath = input.snapshot_path;
+          if (snapshotPath === undefined) {
+            // Enqueue the transition before awaiting progress transport so a
+            // later open request cannot overtake this close.
+            const closing = close(() =>
+              session.close({ progress, cleanupRetry: CLOSE_RETRY }),
+            );
+            await reportOperationStart(progress, "close_binary");
+            const closed = await closing;
+            await reportOperationEnd(progress, "close_binary", closed.ok);
+            return closed;
+          }
+          const closing = close(
+            () =>
+              session.closeWithSnapshot(snapshotPath, input.overwrite, {
+                progress,
+                cleanupRetry: CLOSE_RETRY,
+              }),
+            (receipt) => receipt,
+          );
+          await reportOperationStart(
+            progress,
+            "close_binary",
+            "saving snapshot; closing provider",
+          );
+          const closed = await closing;
+          await reportOperationEnd(progress, "close_binary", closed.ok);
+          return closed.ok ? ok({ ...closed.value }) : closed;
+        },
+      },
+      // The session owns admission, checkpoint publication and completion.
+      reset_investigation: {
+        admission: "sdk",
+        value: (input, { signal }) =>
+          session.resetInvestigation({
+            ...(input.save_path === undefined
+              ? {}
+              : { savePath: input.save_path }),
+            overwrite: input.overwrite,
+            signal,
+            retryCleanup: resetCleanupRetry(options, "reset_investigation"),
+          }),
+      },
+    };
+  }) satisfies Bind<SessionLifecycleOptions>,
   sessionStatus: ((options) => ({
     binary_session: {
       admission: "sdk",
@@ -1727,12 +2058,142 @@ const SERVICE_TOOL_BINDINGS = {
         observeJavaScriptRuntime(runtime, input, options),
     },
   })) satisfies Bind<JavaScriptRuntimeToolOptions>,
+  // Provider operations whose observation becomes atomic Evidence, run on
+  // the analysis admission grants; each family routes its own operations.
+  providerOperations: (({ contracts, ...options }): ContractToolBindings =>
+    Object.fromEntries(
+      contracts.map((contract) => [
+        contract.name,
+        {
+          admission: "sdk",
+          provider: { ...options, operation: contract.name },
+        },
+      ]),
+    )) satisfies Bind<ProviderOperationToolOptions>,
+  // Build computer sessions and the build steps on them. Each tool parses
+  // its own request so a refusal names the field; long steps report a
+  // heartbeat so a client's request timeout can reset; no response, refusals
+  // included, shows a typed secret's value.
+  desktopBuild: ((computers) => {
+    const steps = new DesktopBuildSteps(computers);
+    const presentResult = (result: CallToolResult) =>
+      redactedResult(result, computers.redaction);
+    const tool = <Schema extends z.ZodType>(
+      contract: { readonly name: string; readonly inputSchema: Schema },
+      run: (
+        input: z.output<Schema>,
+        request: ValueToolRequest,
+      ) => Promise<ValueOutcome>,
+    ) => {
+      return {
+        admission: "application" as const,
+        presentResult,
+        value: async (raw: unknown, request: ValueToolRequest) => {
+          const parsed = z.safeParse(contract.inputSchema, raw);
+          return parsed.success
+            ? run(parsed.data, request)
+            : err(
+                analysisInputErrorFromIssues(
+                  contract.name,
+                  parsed.error.issues,
+                  raw,
+                  { cause: parsed.error },
+                ),
+              );
+        },
+      };
+    };
+    const heartbeat = <Value>(
+      { progress }: ValueToolRequest,
+      phase: DesktopBuildTool,
+      run: (progress: ProgressReporter) => Promise<Value>,
+    ) => withHeartbeat(progress, phase, computers.progressMs, run);
+    // A forwarded driver answer, such as a screenshot, follows REA's JSON.
+    const forwarded = (
+      result: Result<ForwardedResult<JsonValue>, AnalysisError>,
+    ): ValueOutcome =>
+      result.ok
+        ? ok(new ForwardedValue(result.value.value, result.value.content))
+        : result;
+    return {
+      start_build_computer: tool(
+        toolContract("start_build_computer"),
+        async (input, { signal, progress }) =>
+          forwarded(await computers.start(input, signal, progress)),
+      ),
+      // An action can wait for the call before it on its computer, and a
+      // reset for the relaunched app, which can take minutes.
+      act_on_build_computer: tool(
+        toolContract("act_on_build_computer"),
+        async (input, request) =>
+          forwarded(
+            await heartbeat(request, "act_on_build_computer", () =>
+              computers.act(input, request.signal),
+            ),
+          ),
+      ),
+      start_build_capture: tool(
+        toolContract("start_build_capture"),
+        async (input, request) =>
+          forwarded(
+            await heartbeat(request, "start_build_capture", () =>
+              steps.startCapture(input, request.signal),
+            ),
+          ),
+      ),
+      mark_build_checkpoint: tool(
+        toolContract("mark_build_checkpoint"),
+        (input, request) =>
+          heartbeat(request, "mark_build_checkpoint", () =>
+            steps.markCheckpoint(input, request.signal),
+          ),
+      ),
+      stop_build_capture: tool(
+        toolContract("stop_build_capture"),
+        (input, request) =>
+          heartbeat(request, "stop_build_capture", () =>
+            steps.stopCapture(input, request.signal),
+          ),
+      ),
+      export_build_environment: tool(
+        toolContract("export_build_environment"),
+        (input, request) =>
+          heartbeat(request, "export_build_environment", () =>
+            steps.exportEnvironment(input, request.signal),
+          ),
+      ),
+      check_build_task: tool(
+        toolContract("check_build_task"),
+        (input, request) =>
+          heartbeat(request, "check_build_task", (progress) =>
+            steps.checkTask(input, request.signal, progress),
+          ),
+      ),
+      // Solves run one at a time for minutes each, so progress keeps the
+      // client waiting.
+      measure_build_task: tool(
+        toolContract("measure_build_task"),
+        (input, request) =>
+          heartbeat(request, "measure_build_task", (progress) =>
+            computers.measure(input, request.signal, progress),
+          ),
+      ),
+      record_build_consent: tool(
+        toolContract("record_build_consent"),
+        (input, { signal }) => steps.recordConsent(input, signal),
+      ),
+      close_build_computer: tool(
+        toolContract("close_build_computer"),
+        (input) => computers.close(input.computer_id),
+      ),
+    };
+  }) satisfies Bind<DesktopBuildToolComputers>,
   // Provider-free access to the guided prompts this server advertises.
   guidedWorkflows: ((prompts) => ({
     guided_workflows: {
       admission: "application",
       value: async (input) =>
-        jsonValueResult(accessGuidedWorkflows(input, prompts)),
+        jsonValueResult(accessGuidedWorkflows(input, { contracts: prompts })),
     },
   })) satisfies Bind<readonly PromptContract[]>,
 } as const;

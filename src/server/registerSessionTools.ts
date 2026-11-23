@@ -5,38 +5,29 @@ import type { ArtifactResourceScope } from "../resources/index.js";
 import type { BinarySessionPort } from "../application/binary/BinarySessionPort.js";
 import { ProcessCaptureResourceScope } from "../process/capture/ProcessCaptureLifecycle.js";
 import { ProcessCaptureError } from "../process/capture/ProcessCaptureError.js";
-import { toolContract } from "../contracts/toolContracts.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../domain/result.js";
 import type { Logger } from "pino";
 import type { ProviderAvailability } from "../ports/AnalysisProvider.js";
-import { registerCloseLifecycleTool } from "./registerCloseLifecycleTool.js";
-import { registerResetInvestigationTool } from "./registerResetInvestigationTool.js";
 import { registerServiceTools } from "./serviceToolBindings.js";
+import type { SessionLifecycleOptions } from "./sessionLifecycle.js";
+import type { SessionStatusToolOptions } from "./sessionStatusTool.js";
 import { sessionAvailabilityPolicy } from "./sessionAvailabilityPolicy.js";
 import type { AvailabilityPolicy } from "../application/CapabilityInventory.js";
 import { withAdmittedAnalysis } from "./analysisAdmission.js";
 import { errorMessage } from "../kernel/errorMessage.js";
 
-export interface LifecycleToolRegistration extends CapabilityAvailabilityProbes {
-  readonly server: EvidenceMcpServer;
-  readonly session: BinarySessionPort;
-  readonly logger: Logger;
-  readonly closeContract: ReturnType<typeof toolContract<"close_binary">>;
-  readonly startedAt: string;
-  readonly availabilityPolicy: () => AvailabilityPolicy;
-  readonly artifactResources: ArtifactResourceScope;
-  readonly closeProcessResources: () => Promise<Result<null, AnalysisError>>;
-}
+/** What the lifecycle and status tools of one session need. */
+interface LifecycleToolRegistration
+  extends SessionStatusToolOptions, SessionLifecycleOptions {}
 
+/** Close, reset and status run outside analysis admission; the session orders them. */
 const registerLifecycleTools = (
   registration: LifecycleToolRegistration,
 ): void => {
-  registerCloseLifecycleTool(registration);
-  registerResetInvestigationTool(registration);
   registerServiceTools(
     registration.server,
-    { sessionStatus: registration },
+    { sessionLifecycle: registration, sessionStatus: registration },
     { logger: registration.logger },
   );
 };
@@ -58,14 +49,12 @@ export const registerSessionTools = (
   logger: Logger,
   options: SessionToolOptions,
 ): void => {
-  const closeContract = toolContract("close_binary");
   const processResources = new ProcessCaptureResourceScope();
   registerLifecycleTools({
     ...options,
     server,
     session,
     logger,
-    closeContract,
     startedAt: options.startedAt ?? new Date().toISOString(),
     availabilityPolicy: sessionAvailabilityPolicy(
       options.availabilityPolicy,
@@ -169,7 +158,9 @@ const missingAndroidAvailability = async (): Promise<ProviderAvailability> => ({
   status: "unavailable",
   code: "not_configured",
   reason: "No Android JADX analysis provider is configured.",
+  // The Android boundary owns the versioned remediation; this composition
+  // default names no release so it cannot drift from the pinned engine.
   remediation:
-    "Set REA_JADX_MCP_JAR to the jadx-headless-mcp 0.7.1 release JAR (rea doctor --provider jadx names its download URL and SHA-256) and provide a full JDK on Linux, macOS, or Windows x64 with its matching bundled native controls.",
+    "Set REA_JADX_MCP_JAR to a caller-supplied jadx-headless-mcp JAR (rea doctor --provider jadx names its download URL and SHA-256) and provide a full JDK on Linux, macOS, or Windows x64 with its matching bundled native controls.",
   diagnostics: { configured: false },
 });

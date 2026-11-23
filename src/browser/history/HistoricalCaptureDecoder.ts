@@ -14,6 +14,7 @@ import {
 import {
   CAPTURE_PROCESS_MEMORY_LIMIT_REASON,
   historicalCaptureFailure,
+  recordedDecoderCpuSeconds,
   captureMemoryFailure,
   protobufCaptureFailure,
   withCaptureReaderCleanup,
@@ -46,10 +47,11 @@ import {
   AnalysisOutputError,
   AnalysisResourceConstraintError,
   cancelledBy,
+  fixedCeilingConstraint,
 } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
-import { analysisErrorWithCleanupFailure } from "../../domain/analysisErrorCleanup.js";
+import { analysisErrorWithCleanupDependencies } from "../../domain/analysisErrorCleanup.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import {
   WEB_NETWORK_CAPTURE_LIMITS,
@@ -256,6 +258,14 @@ export class HistoricalCaptureDecoder {
               message: reply.message,
             },
           ]);
+        // No capture budget raises a ceiling the decoder's reader named.
+        if (reply.reason === "fixed-limit")
+          throw fixedCeilingConstraint(
+            OPERATION,
+            reply.boundary,
+            reply.message,
+            reply.ceiling,
+          );
         const limit = captureLimitForReply(reply.reason);
         if (limit !== undefined) {
           const { parameter, expected } = CAPTURE_LIMITS[limit];
@@ -300,6 +310,14 @@ export class HistoricalCaptureDecoder {
             input.format,
             OPERATION,
             reply.message,
+            {
+              userMessage: reply.message,
+              remediationAction:
+                "Meet the reported capture format or decoder requirement before retrying.",
+              ...(reply.pointer === ""
+                ? {}
+                : { diagnostics: { pointer: reply.pointer } }),
+            },
           );
         throw new AnalysisOutputError(OPERATION, reply.message, {
           userMessage: `The capture decoder refused a complete reply exceeding ${String(captureBudgets().outputBytes)} bytes: ${reply.message}`,
@@ -424,6 +442,11 @@ export class HistoricalCaptureDecoder {
       // Preparation transfers independent helper/descriptor owners. Keep that
       // typed stage separate from the decoder supervisor lease above: its
       // historical error already follows the post-launch completion owner.
+      const effectiveCpuSeconds = await recordedDecoderCpuSeconds(
+        runtime?.path,
+        cause,
+        runtimeResources,
+      );
       const error = retainProcessInspectionCleanup(
         processInspectionFailure(cause),
         historicalCaptureFailure(
@@ -433,6 +456,7 @@ export class HistoricalCaptureDecoder {
           options,
           reportedHeap,
           processLease,
+          effectiveCpuSeconds,
         ),
         runtimeResources,
         OPERATION,
@@ -531,7 +555,7 @@ export class HistoricalCaptureDecoder {
       );
       const failure = result.ok
         ? cleanupError
-        : analysisErrorWithCleanupFailure(
+        : analysisErrorWithCleanupDependencies(
             result.error,
             cleanupError,
             OPERATION,
@@ -539,8 +563,6 @@ export class HistoricalCaptureDecoder {
       if (completedCapture !== undefined)
         failure.retainPartialObservation(completedCapture);
       new AnalysisCleanupLeaseGroup(cleanupError, [cleanupFailure.lease]);
-      if (!result.ok)
-        failure.bindCleanupDependencies([result.error, cleanupError]);
       new AnalysisCleanupLeaseGroup(failure, [cleanupFailure.lease]);
       return err(redactExplicitFailure(failure, input.sensitive_values));
     }

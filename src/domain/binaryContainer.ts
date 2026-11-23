@@ -1,3 +1,4 @@
+import type { FixedCeilingFacts } from "./fixedAllowanceRemediation.js";
 import {
   resolveMappedFileOffset,
   type FileMapping,
@@ -5,6 +6,22 @@ import {
 } from "./virtualFileMapping.js";
 import type { PeDataDirectory } from "./peOptionalHeader.js";
 import { decodeLimit, ParseFailureError } from "./parseFailure.js";
+
+/** Return whether the leading bytes begin with the 4-byte ELF magic (`\x7fELF`). */
+export const hasElfMagic = (bytes: Uint8Array): boolean =>
+  bytes.length >= 4 &&
+  bytes[0] === 0x7f &&
+  bytes[1] === 0x45 &&
+  bytes[2] === 0x4c &&
+  bytes[3] === 0x46;
+
+/** Return whether the leading bytes begin with the 4-byte XAR archive magic (`xar!`). */
+export const hasXarMagic = (bytes: Uint8Array): boolean =>
+  bytes.length >= 4 &&
+  bytes[0] === 0x78 &&
+  bytes[1] === 0x61 &&
+  bytes[2] === 0x72 &&
+  bytes[3] === 0x21;
 
 /** Native container facts a format failure can name. */
 interface BinaryFormatFailureFacts {
@@ -56,11 +73,17 @@ export class BinaryMappingFailure extends BinaryFormatFailure {
  * `LimitRef`; it defaults to the boundary when a decoder has only one.
  */
 export class BinaryResourceFailure extends ParseFailureError<"limit"> {
+  /**
+   * @param maximum_bytes The exceeded maximum, in `unit`. Despite its name,
+   *   some producers count entries or values; `unit` says which, and is
+   *   undefined when the producer has not named it.
+   */
   constructor(
     readonly boundary: "build-info" | "structure" | "search",
     readonly maximum_bytes: number,
     message: string,
     allowance: string = boundary,
+    readonly unit?: "bytes" | "entries",
   ) {
     super({
       kind: "limit",
@@ -71,6 +94,14 @@ export class BinaryResourceFailure extends ParseFailureError<"limit"> {
     this.name = "BinaryResourceFailure";
   }
 }
+
+/** The exceeded maximum as fixed-ceiling facts; the unit only when its producer named it. */
+export const binaryResourceCeiling = (
+  failure: BinaryResourceFailure,
+): FixedCeilingFacts => ({
+  limit: failure.maximum_bytes,
+  ...(failure.unit === undefined ? {} : { unit: failure.unit }),
+});
 
 /** The failure's allowance when it is one of `allowances`, else `null`. */
 export const binaryResourceAllowance = <Allowance extends string>(
@@ -166,15 +197,18 @@ export type ImageSection = {
       };
       readonly segment_mapping: FileMapping | null;
       readonly segment_unmapped: boolean;
+      /** Non-zero-fill bytes within the file and the segment's file range. */
+      readonly on_disk: boolean;
       /** Declared `reloff` and `nreloc`, which only object files populate. */
       readonly relocations: { readonly offset: number; readonly count: number };
     }
 );
 
-/** Declared PT_DYNAMIC file extent, before consumer-specific admission. */
+/** Declared PT_DYNAMIC location, before consumer-specific admission. */
 export interface ElfDynamicSegment {
   readonly offset: bigint;
   readonly size: bigint;
+  readonly virtual_address: bigint;
 }
 
 /** Native container facts, without language metadata search policy. */
@@ -214,7 +248,8 @@ export type BinaryContainer = BinaryContainerFacts &
           readonly dynamicSegments: readonly ElfDynamicSegment[];
         };
       }
-    | { readonly format: "pe" | "macho" }
+    | { readonly format: "pe" }
+    | { readonly format: "macho"; readonly macho_cpu_type: number }
   );
 
 /** All declared file-backed image memory, including PE headers at the image base. */
@@ -225,6 +260,61 @@ export const imageFileMappings = (
     ? container.mappings
     : [container.pe_header_mapping, ...container.mappings];
 
+/** Decode an unsigned 16-bit integer from a caller-validated `[offset, offset + 2)` span. */
+export const readUint16At = (
+  bytes: Uint8Array,
+  offset: number,
+  little: boolean,
+): number =>
+  little
+    ? bytes[offset]! | (bytes[offset + 1]! << 8)
+    : (bytes[offset]! << 8) | bytes[offset + 1]!;
+
+/** Decode a signed 32-bit integer from a caller-validated `[offset, offset + 4)` span. */
+export const readInt32At = (
+  bytes: Uint8Array,
+  offset: number,
+  little: boolean,
+): number =>
+  little
+    ? bytes[offset]! |
+      (bytes[offset + 1]! << 8) |
+      (bytes[offset + 2]! << 16) |
+      (bytes[offset + 3]! << 24)
+    : (bytes[offset]! << 24) |
+      (bytes[offset + 1]! << 16) |
+      (bytes[offset + 2]! << 8) |
+      bytes[offset + 3]!;
+
+/** Decode an unsigned 32-bit integer from a caller-validated `[offset, offset + 4)` span. */
+export const readUint32At = (
+  bytes: Uint8Array,
+  offset: number,
+  little: boolean,
+): number => readInt32At(bytes, offset, little) >>> 0;
+
+/** Decode an unsigned 64-bit integer from a caller-validated `[offset, offset + 8)` span. */
+export const readUint64At = (
+  bytes: Uint8Array,
+  offset: number,
+  little: boolean,
+): bigint => {
+  const lo = readUint32At(bytes, little ? offset : offset + 4, little);
+  const hi = readUint32At(bytes, little ? offset + 4 : offset, little);
+  return (BigInt(hi) << 32n) | BigInt(lo);
+};
+
+/** Decode a signed 64-bit integer from a caller-validated `[offset, offset + 8)` span. */
+export const readInt64At = (
+  bytes: Uint8Array,
+  offset: number,
+  little: boolean,
+): bigint => {
+  const lo = readUint32At(bytes, little ? offset : offset + 4, little);
+  const hi = readInt32At(bytes, little ? offset + 4 : offset, little);
+  return (BigInt(hi) << 32n) | BigInt(lo);
+};
+
 /** Reader that checks every structural range before decoding numeric fields. */
 export class BinaryReader {
   constructor(
@@ -234,7 +324,7 @@ export class BinaryReader {
     readonly format: string,
   ) {}
 
-  range(offset: number, size: number, label: string): Buffer {
+  #checkRange(offset: number, size: number, label: string): void {
     if (
       !Number.isSafeInteger(offset) ||
       !Number.isSafeInteger(size) ||
@@ -257,23 +347,78 @@ export class BinaryReader {
         `${label} range is truncated or outside the file`,
         { format: this.format, offset, field: label },
       );
+  }
+
+  range(offset: number, size: number, label: string): Buffer {
+    this.#checkRange(offset, size, label);
     return this.bytes.subarray(offset, offset + size);
   }
 
+  u8(offset: number): number {
+    this.#checkRange(offset, 1, "8-bit field");
+    return this.bytes.readUInt8(offset);
+  }
+
+  i8(offset: number): number {
+    this.#checkRange(offset, 1, "8-bit field");
+    return this.bytes.readInt8(offset);
+  }
+
   u16(offset: number): number {
-    const value = this.range(offset, 2, "16-bit field");
-    return this.little ? value.readUInt16LE() : value.readUInt16BE();
+    this.#checkRange(offset, 2, "16-bit field");
+    return this.little
+      ? this.bytes.readUInt16LE(offset)
+      : this.bytes.readUInt16BE(offset);
+  }
+
+  i16(offset: number): number {
+    this.#checkRange(offset, 2, "16-bit field");
+    return this.little
+      ? this.bytes.readInt16LE(offset)
+      : this.bytes.readInt16BE(offset);
   }
 
   u32(offset: number): number {
-    const value = this.range(offset, 4, "32-bit field");
-    return this.little ? value.readUInt32LE() : value.readUInt32BE();
+    this.#checkRange(offset, 4, "32-bit field");
+    return this.little
+      ? this.bytes.readUInt32LE(offset)
+      : this.bytes.readUInt32BE(offset);
+  }
+
+  i32(offset: number): number {
+    this.#checkRange(offset, 4, "32-bit field");
+    return this.little
+      ? this.bytes.readInt32LE(offset)
+      : this.bytes.readInt32BE(offset);
+  }
+
+  i64(offset: number): bigint {
+    this.#checkRange(offset, 8, "64-bit field");
+    return this.little
+      ? this.bytes.readBigInt64LE(offset)
+      : this.bytes.readBigInt64BE(offset);
+  }
+
+  f32(offset: number): number {
+    this.#checkRange(offset, 4, "32-bit field");
+    return this.little
+      ? this.bytes.readFloatLE(offset)
+      : this.bytes.readFloatBE(offset);
+  }
+
+  f64(offset: number): number {
+    this.#checkRange(offset, 8, "64-bit field");
+    return this.little
+      ? this.bytes.readDoubleLE(offset)
+      : this.bytes.readDoubleBE(offset);
   }
 
   word(offset: number, bits: 32 | 64): bigint {
     if (bits === 32) return BigInt(this.u32(offset));
-    const value = this.range(offset, 8, "64-bit field");
-    return this.little ? value.readBigUInt64LE() : value.readBigUInt64BE();
+    this.#checkRange(offset, 8, "64-bit field");
+    return this.little
+      ? this.bytes.readBigUInt64LE(offset)
+      : this.bytes.readBigUInt64BE(offset);
   }
 
   fileRange(offset: bigint, size: bigint, label: string): FileMapping {
@@ -304,13 +449,16 @@ export class BinaryReader {
 
   table(offset: bigint, count: number, width: number, label: string): number {
     const size = BigInt(count) * BigInt(width);
+    const range = this.fileRange(offset, size, label);
     if (size > 16n * 1024n * 1024n)
       throw new BinaryResourceFailure(
         "structure",
         16 * 1024 * 1024,
         `${label} exceeds the 16 MiB structural decoding budget`,
+        "structure",
+        "bytes",
       );
-    return this.fileRange(offset, size, label).offset;
+    return range.offset;
   }
 }
 
@@ -488,7 +636,7 @@ export const createFileMappingIndex = (
     if (typeof translations[index] === "bigint") next = index;
     nextMapped[index] = next;
   }
-  const offset = (address: bigint, size: number): number => {
+  const tryOffset = (address: bigint, size: number): number | undefined => {
     if (!Number.isSafeInteger(size) || size <= 0)
       return mappedFileOffset(mappings, address, size, zeroFills);
     const end = address + BigInt(size);
@@ -510,10 +658,7 @@ export const createFileMappingIndex = (
       );
     const translation = translations[interval];
     if (typeof translation !== "bigint" || (runEnd[interval] as bigint) < end)
-      throw new BinaryMappingFailure(
-        "unmapped",
-        "Virtual address or string range is not file mapped",
-      );
+      return undefined;
     const zeroFill = lastAtOrBelow(zeroFilled.starts, end - 1n);
     if (zeroFill >= 0 && (zeroFilled.reach[zeroFill] as bigint) > address)
       throw new BinaryMappingFailure(
@@ -521,6 +666,40 @@ export const createFileMappingIndex = (
         "Virtual address has ambiguous file and zero-fill mappings",
       );
     return Number(address + translation);
+  };
+  const offset = (address: bigint, size: number): number => {
+    const resolved = tryOffset(address, size);
+    if (resolved === undefined)
+      throw new BinaryMappingFailure(
+        "unmapped",
+        "Virtual address or string range is not file mapped",
+      );
+    return resolved;
+  };
+  const prefix = (
+    address: bigint,
+    maximumBytes: number,
+  ): FileMapping | null => {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) return null;
+    const interval = lastAtOrBelow(boundaries, address);
+    const translation = translations[interval];
+    if (typeof translation !== "bigint") return null;
+    const zeroFill = lastAtOrBelow(zeroFilled.starts, address);
+    if (zeroFill >= 0 && (zeroFilled.reach[zeroFill] as bigint) > address)
+      return null;
+    const mappingEnd = runEnd[interval] as bigint;
+    const zeroFillStart = zeroFilled.starts[zeroFill + 1];
+    const backingEnd =
+      zeroFillStart !== undefined && zeroFillStart < mappingEnd
+        ? zeroFillStart
+        : mappingEnd;
+    const limit = address + BigInt(maximumBytes);
+    const end = backingEnd < limit ? backingEnd : limit;
+    return {
+      address,
+      offset: Number(address + translation),
+      size: Number(end - address),
+    };
   };
   const access: MappedStringAccess = {
     offset,
@@ -536,6 +715,8 @@ export const createFileMappingIndex = (
   };
   return {
     offset,
+    tryOffset,
+    prefix,
     readCString: (bytes, address, maximumBytes) =>
       readMappedString(bytes, access, address, maximumBytes),
   };
@@ -544,6 +725,13 @@ export const createFileMappingIndex = (
 /** One immutable image's indexed mappings and bounded string access. */
 export interface FileMappingIndex {
   readonly offset: (address: bigint, size: number) => number;
+  /** Like `offset`, returning `undefined` on unmapped spans while still throwing on ambiguity. */
+  readonly tryOffset: (address: bigint, size: number) => number | undefined;
+  /** Longest file-backed prefix up to the requested length with one translation. */
+  readonly prefix: (
+    address: bigint,
+    maximumBytes: number,
+  ) => FileMapping | null;
   readonly readCString: (
     bytes: Buffer,
     address: bigint,
@@ -559,11 +747,11 @@ interface MappedStringAccess {
 /** Read a bounded NUL-terminated string while retaining mapping/alias semantics. */
 export const readMappedCString = (
   bytes: Buffer,
-  image: BinaryContainer,
+  mappings: readonly FileMapping[],
   address: bigint,
   maximumBytes: number,
+  zeroFills: readonly ZeroFillMapping[],
 ): Buffer => {
-  const mappings = imageFileMappings(image);
   return readMappedString(
     bytes,
     {
@@ -574,7 +762,7 @@ export const readMappedCString = (
             cursor < range.address + BigInt(range.size),
         ),
       offset: (cursor, size) =>
-        mappedFileOffset(mappings, cursor, size, image.zero_fills),
+        mappedFileOffset(mappings, cursor, size, zeroFills),
     },
     address,
     maximumBytes,

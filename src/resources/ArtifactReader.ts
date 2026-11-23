@@ -1,12 +1,10 @@
-import type {
-  FixedAllowance,
-  FixedAllowanceKind,
-} from "../domain/fixedAllowanceRemediation.js";
+import type { FixedAllowance } from "../domain/fixedAllowanceRemediation.js";
 import type { ArtifactReaderLimitFact } from "../domain/artifactReaderLimits.js";
 import type {
   ArtifactAdmissionLimit,
   ArtifactIntegrityCheck,
   ArtifactLimitBoundary,
+  ArtifactOperationError,
 } from "../domain/artifactOperationError.js";
 import type {
   ArtifactContainerIntegrityPair,
@@ -28,6 +26,7 @@ import type {
   AnalysisPartialObservation,
 } from "../domain/analysisErrorBase.js";
 import { errorMessage } from "../kernel/errorMessage.js";
+import type { LimitRef } from "../domain/parseFailure.js";
 
 export interface ArtifactReaderFailureOptions extends ErrorOptions {
   /** Recovery guidance established by the producing adapter, separate from diagnostics. */
@@ -44,8 +43,9 @@ export interface ArtifactReaderFailureOptions extends ErrorOptions {
   /** Named admission whose recovery must not be inferred from other limit text. */
   readonly admission?: ArtifactAdmissionLimit;
   readonly readerLimit?: ArtifactReaderLimitFact;
+  readonly parserLimit?: LimitRef;
   /** For a `limit` failure, the release-fixed allowance that refused the input. */
-  readonly fixedAllowance?: FixedAllowance;
+  readonly fixedAllowance?: ArtifactFixedLimit;
   /** For an `integrity` failure, the check that failed, when the reader names it. */
   readonly integrityCheck?: ArtifactIntegrityCheck | undefined;
 }
@@ -236,6 +236,9 @@ export interface ArtifactReader {
     | "unityfs"
     | "wxapkg"
     | "uimage"
+    | "android-boot-image"
+    | "android-ota-payload"
+    | "uefi"
     | "pyinstaller"
     | "dotnet-bundle"
     | "bun-standalone"
@@ -274,14 +277,7 @@ export type CleanupFailedRead = ArtifactReaderFailure & {
 };
 
 /** Why an artifact reader failed. */
-export type ArtifactReaderFailureReason =
-  | "cancelled"
-  | "format"
-  | "integrity"
-  | "io"
-  | "limit"
-  | "path"
-  | "unavailable";
+export type ArtifactReaderFailureReason = ArtifactOperationError["reason"];
 
 export class ArtifactReaderFailure extends Error {
   readonly userMessage: string | undefined;
@@ -295,7 +291,8 @@ export class ArtifactReaderFailure extends Error {
   /** Named admission for a limit whose public recovery is owned by the producer. */
   readonly admission: ArtifactAdmissionLimit | undefined;
   readonly readerLimit: ArtifactReaderLimitFact | undefined;
-  readonly fixedAllowance: FixedAllowance | undefined;
+  readonly parserLimit: LimitRef | undefined;
+  readonly fixedAllowance: ArtifactFixedLimit | undefined;
   readonly integrityCheck: ArtifactIntegrityCheck | undefined;
 
   /** An `integrity` failure names the check that failed. */
@@ -346,6 +343,7 @@ export class ArtifactReaderFailure extends Error {
     this.boundary = options?.boundary;
     this.admission = options?.admission;
     this.readerLimit = options?.readerLimit;
+    this.parserLimit = options?.parserLimit;
     this.fixedAllowance = options?.fixedAllowance;
     this.integrityCheck = options?.integrityCheck;
   }
@@ -361,6 +359,7 @@ export class ArtifactReaderFailure extends Error {
     | "boundary"
     | "admission"
     | "readerLimit"
+    | "parserLimit"
     | "fixedAllowance"
   > & { readonly integrityCheck: ArtifactIntegrityCheck | undefined } {
     return {
@@ -375,6 +374,9 @@ export class ArtifactReaderFailure extends Error {
       ...(this.readerLimit === undefined
         ? {}
         : { readerLimit: this.readerLimit }),
+      ...(this.parserLimit === undefined
+        ? {}
+        : { parserLimit: this.parserLimit }),
       ...(this.fixedAllowance === undefined
         ? {}
         : { fixedAllowance: this.fixedAllowance }),
@@ -455,14 +457,14 @@ export class ArtifactReaderFailure extends Error {
   }
 }
 
-/** A release-fixed reader ceiling and its value. */
-export interface ArtifactFixedLimit {
-  /** Display name, such as "The wxapkg member table allowance". */
-  readonly name: string;
-  readonly kind: FixedAllowanceKind;
+/**
+ * A release-fixed reader ceiling. The reader states its value, so a consumer
+ * that carries the ceiling to another process or projection keeps it.
+ */
+export type ArtifactFixedLimit = FixedAllowance & {
   readonly limit: number;
   readonly unit: string;
-}
+};
 
 /**
  * Refuse input above a release-fixed reader ceiling. `outcome` states what
@@ -472,8 +474,10 @@ export const artifactFixedLimitFailure = (
   allowance: ArtifactFixedLimit,
   outcome: string,
   boundary: ArtifactLimitBoundary = "capacity",
+  options?: ErrorOptions,
 ): ArtifactReaderFailure =>
   new ArtifactReaderFailure("limit", outcome, {
+    ...options,
     boundary,
     userMessage: outcome,
     fixedAllowance: allowance,
